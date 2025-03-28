@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Radial Phylogenetic Tree with Circular Legend</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 0; background: #fff; font-size: 10px; }
+    svg { display: block; margin: 0 auto; }
+
+    .link { fill: none; stroke: #333; stroke-width: .3px; stroke-opacity: 0.6; }
+    .highlighted { stroke: orange !important; stroke-width: 2.5px; }
+    .faded { opacity: 0.1; }
+
+    .node circle { stroke: #333; stroke-width: 0.5px; stroke-opacity: 0.6; }
+
+    .label {
+      font-size: 7px;
+      letter-spacing: 0.2px;
+      pointer-events: none;
+    }
+
+    .legend-label {
+      font-size: 8px;
+      pointer-events: all;
+      alignment-baseline: middle;
+    }
+
+    #tooltip {
+      position: absolute;
+      background: white;
+      border: 1px solid #ccc;
+      font-size: 12px;
+      padding: 6px;
+      display: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<svg viewBox="-520 -520 1040 1040"></svg>
+<div id="tooltip"></div>
+
+<script>
+const radius = 480;
+const svg = d3.select("svg");
+const g = svg.append("g");
+const tooltip = d3.select("#tooltip");
+
+const tree = d3.cluster().size([2 * Math.PI, radius - 140]);
+
+const palette = [
+  "#8c6bb1", "#63a598", "#e07a5f", "#84a59d", "#f28482",
+  "#f6bd60", "#6c91bf", "#999999", "#e2c290", "#9e768f"
+];
+
+d3.json("sgb_taxonomy_tree.json").then(data => {
+  const root = d3.hierarchy(data);
+  tree(root);
+
+  const allPhyla = new Set();
+  root.descendants().forEach(d => {
+    const p = d.data?.metadata?.taxonomy?.p || "Unknown";
+    allPhyla.add(p);
+  });
+
+  const sortedPhyla = [...allPhyla].sort();
+  const phylumColor = d3.scaleOrdinal()
+    .domain(sortedPhyla)
+    .range(palette.concat(palette));
+
+  const visiblePhyla = new Set(sortedPhyla);
+  const angle = d3.scalePoint().domain(sortedPhyla).range([0, 2 * Math.PI]);
+
+  // Links
+  const links = g.append("g")
+    .selectAll("path")
+    .data(root.links())
+    .join("path")
+    .attr("class", "link")
+    .attr("stroke", d => {
+      const p = d.target.data?.metadata?.taxonomy?.p || "Unknown";
+      return phylumColor(p);
+    })
+    .attr("d", d3.linkRadial()
+      .angle(d => d.x)
+      .radius(d => d.y));
+
+  // Nodes
+  const node = g.append("g")
+    .selectAll("g")
+    .data(root.descendants())
+    .join("g")
+    .attr("transform", d => `
+      rotate(${d.x * 180 / Math.PI - 90})
+      translate(${d.y},0)
+    `);
+
+  node.append("circle")
+    .attr("r", d => d.children ? 1 : 2)
+    .attr("fill", d => {
+      if (d.children) return "#666";
+      const p = d.data?.metadata?.taxonomy?.p || "Unknown";
+      return phylumColor(p);
+    });
+
+  // Labels (leaf nodes only, hidden by default)
+  node.filter(d => !d.children)
+    .append("text")
+    .attr("dy", "0.31em")
+    .attr("x", d => d.x < Math.PI ? 8 : -8)
+    .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+    .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+    .attr("class", "label")
+    .style("opacity", 0)
+    .text(d => d.data.name);
+
+  // Tooltip + highlight
+  node.on("mouseover", function(event, d) {
+    const pathSet = new Set();
+    let current = d;
+    while (current) {
+      pathSet.add(current);
+      current = current.parent;
+    }
+
+    links.classed("faded", l => !(pathSet.has(l.source) && pathSet.has(l.target)))
+         .classed("highlighted", l => pathSet.has(l.source) && pathSet.has(l.target));
+
+    node.select("circle")
+        .classed("faded", n => !pathSet.has(n))
+        .classed("highlighted", n => pathSet.has(n));
+
+    svg.selectAll("text.label")
+        .style("opacity", n => n === d ? 1 : 0);
+
+    const meta = d.data?.metadata || {};
+    const phylum = meta?.taxonomy?.p || "Unknown";
+    const abundance = meta?.average_abundance?.toFixed(4) || "N/A";
+    const uSGB = meta?.uSGB === true || meta?.uSGB === "Yes" ? "Yes" : "No";
+
+    tooltip
+      .style("left", (event.pageX + 10) + "px")
+      .style("top", (event.pageY - 20) + "px")
+      .style("display", "block")
+      .html(`<strong>SGB:</strong> ${d.data.name}<br/>
+             <strong>Phylum:</strong> ${phylum}<br/>
+             <strong>Abundance:</strong> ${abundance}<br/>
+             <strong>uSGB:</strong> ${uSGB}`);
+  }).on("mouseout", () => {
+    tooltip.style("display", "none");
+    links.classed("highlighted", false).classed("faded", false);
+    node.select("circle").classed("highlighted", false).classed("faded", false);
+    svg.selectAll("text.label").style("opacity", 0);
+  });
+
+  // Circular legend
+  const legendRing = radius;
+
+  const legend = svg.append("g")
+    .attr("class", "legend");
+
+  sortedPhyla.forEach((phylum, i) => {
+    const a = angle(phylum);
+    const x = legendRing * Math.cos(a - Math.PI / 2);
+    const y = legendRing * Math.sin(a - Math.PI / 2);
+
+    const gItem = legend.append("g")
+      .attr("transform", `translate(${x},${y})`)
+      .style("cursor", "pointer")
+      .on("click", () => {
+        if (visiblePhyla.has(phylum)) visiblePhyla.delete(phylum);
+        else visiblePhyla.add(phylum);
+        updateVisibility();
+      });
+
+    gItem.append("circle")
+      .attr("r", 3)
+      .attr("fill", phylumColor(phylum))
+      .attr("stroke", "#333")
+      .attr("stroke-width", 0.4);
+
+    const labelAngle = a * 180 / Math.PI - 90;
+    gItem.append("text")
+      .attr("x", 6)
+      .attr("dy", "0.32em")
+      .attr("class", "legend-label")
+      .text(phylum);
+  });
+
+  function updateVisibility() {
+    node.select("circle")
+      .style("opacity", d =>
+        d.children ? 1 :
+        visiblePhyla.has(d.data?.metadata?.taxonomy?.p || "Unknown") ? 1 : 0.05);
+    links.style("opacity", d =>
+      visiblePhyla.has(d.target.data?.metadata?.taxonomy?.p || "Unknown") ? 1 : 0.05);
+    svg.selectAll("text.label").style("opacity", 0);
+  }
+});
+</script>
+</body>
+</html>
